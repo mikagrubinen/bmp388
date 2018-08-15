@@ -80,12 +80,18 @@
 /*********************************************************************/
 /* macro definitions */
 #define BHY_INT_PIN			PIO_PC7_IDX
+#define BMP_INT_PIN			PIO_PC6_IDX
 #define BHY_SAGPIO7_PIN		PIO_PC2_IDX
 #define ON					(1)
 #define OFF					(0)
-// Debug Line Pin
+// Debug Line Pins
 #define TEST_PIN			PIO_PC1_IDX
+#define TEST_PIN_1			PIO_PC0_IDX
 
+/* FIFO object to be assigned to device structure */
+struct bmp3_fifo fifo;
+/* Used to select the settings user needs to change */
+uint16_t settings_sel;
 
 /*********************************************************************/
 /* functions */
@@ -104,6 +110,12 @@ int main(void)
 	struct bmp3_dev dev;
 	int8_t rslt = BMP3_OK;
 	
+	
+	/* Pressure and temperature array of structures with maximum frame size */
+	struct bmp3_data sensor_data[73] = {0};
+	/* try count for polling the watermark interrupt status */
+	uint16_t try_count;
+	
 	dev.dev_id = BMP3_I2C_ADDR_PRIM;
 	dev.intf = BMP3_I2C_INTF;
 	dev.read = I2C_READ;
@@ -117,11 +129,16 @@ int main(void)
 	// pin initialization
 	ioport_set_pin_dir(BHY_INT_PIN, IOPORT_DIR_INPUT);
 	ioport_set_pin_level(BHY_INT_PIN, 0);
+	ioport_set_pin_dir(BMP_INT_PIN, IOPORT_DIR_INPUT);
+	ioport_set_pin_level(BMP_INT_PIN, 0);
 	ioport_set_pin_dir(BHY_SAGPIO7_PIN, IOPORT_DIR_OUTPUT);
 	ioport_set_pin_level(BHY_SAGPIO7_PIN, 0);
 	
 	ioport_set_pin_dir(TEST_PIN, IOPORT_DIR_OUTPUT);
 	ioport_set_pin_level(TEST_PIN, 0);
+	ioport_set_pin_dir(TEST_PIN_1, IOPORT_DIR_OUTPUT);
+	ioport_set_pin_level(TEST_PIN, 0);
+	
 
 	/*power on the shuttle board */
 	delaym_local(500);
@@ -129,9 +146,46 @@ int main(void)
 	set_shuttle_vddio(ON);
 	delaym_local(500);
 
-	rslt = bmp3_init(&dev);
-	
+	rslt = bmp3_init(&dev);	
 	rslt = configure_and_get_fifo_data(&dev); 	
+	
+	for (int i=0; i<100; i++)
+	{
+		while (0==ioport_get_pin_level(BMP_INT_PIN));
+		rslt = bmp3_get_status(&dev);
+			
+		if (dev.status.intr.fifo_wm == 1)
+		{
+			ioport_set_pin_level(TEST_PIN, 1);
+			rslt = bmp3_get_fifo_data(&dev);
+			rslt = bmp3_extract_fifo_data(sensor_data, &dev);
+			ioport_set_pin_level(TEST_PIN, 0);
+		}
+	}
+	
+	fifo.settings.mode = BMP3_DISABLE;
+	fifo.settings.press_en = BMP3_DISABLE;
+	fifo.settings.temp_en = BMP3_DISABLE;
+	fifo.settings.fwtm_en = BMP3_DISABLE;
+	dev.settings.int_settings.drdy_en = BMP3_ENABLE;
+	settings_sel = BMP3_FIFO_MODE_SEL | BMP3_FIFO_TEMP_EN_SEL |	BMP3_FIFO_PRESS_EN_SEL | BMP3_FIFO_FWTM_EN_SEL | BMP3_DRDY_EN_SEL;
+		
+	rslt = bmp3_set_sensor_settings(settings_sel, &dev);
+	rslt = bmp3_set_fifo_settings(settings_sel, &dev);	
+	
+	while(1)
+	{
+		while (0==ioport_get_pin_level(BMP_INT_PIN));
+		rslt = bmp3_get_status(&dev);
+			
+		if (dev.status.intr.drdy == 1)
+		{
+			ioport_set_pin_level(TEST_PIN_1, 1);
+			rslt = get_sensor_data(&dev);
+			//delaym_local(1);
+			ioport_set_pin_level(TEST_PIN_1, 0);
+		}
+	}
 }
 
 
@@ -201,9 +255,9 @@ int8_t get_sensor_data(struct bmp3_dev *dev)
 	rslt = bmp3_get_sensor_data(sensor_comp, &data, dev);
 
 	/* Print the temperature and pressure data */
-	printf("Temperature\t Pressure\t\n");
-	printf("%0.2f\t\t %0.2f\t\t\n",data.temperature, data.pressure);
-
+	//printf("Temperature\t Pressure\t\n");
+	//printf("%0.2f\t\t %0.2f\t\t\n",data.temperature, data.pressure);
+	
 	return rslt;
 }
 
@@ -215,7 +269,7 @@ int8_t configure_int_pin(struct bmp3_dev *dev)
 	
 	dev->settings.int_settings.drdy_en = BMP3_DISABLE;
 	dev->settings.int_settings.latch = BMP3_INT_PIN_NON_LATCH;
-	dev->settings.int_settings.level = BMP3_INT_PIN_ACTIVE_LOW;
+	dev->settings.int_settings.level = BMP3_INT_PIN_ACTIVE_HIGH;
 	dev->settings.int_settings.output_mode = BMP3_INT_PIN_PUSH_PULL;
 	
 	 settings_sel = BMP3_OUTPUT_MODE_SEL | BMP3_LEVEL_SEL | BMP3_LATCH_SEL | BMP3_DRDY_EN_SEL;
@@ -228,14 +282,10 @@ int8_t configure_and_get_fifo_data(struct bmp3_dev *dev)
 	int8_t rslt;
 	/* Loop Variable */
 	uint8_t i;
-	/* FIFO object to be assigned to device structure */
-	struct bmp3_fifo fifo;
-	/* Pressure and temperature array of structures with maximum frame size */
-	struct bmp3_data sensor_data[73] = {0};
-	/* Used to select the settings user needs to change */
-	uint16_t settings_sel;
-	/* try count for polling the watermark interrupt status */
-	uint16_t try_count;
+	
+	
+	
+	
 	
 	fifo.settings.mode = BMP3_ENABLE;
 	fifo.settings.press_en = BMP3_ENABLE;
@@ -258,39 +308,11 @@ int8_t configure_and_get_fifo_data(struct bmp3_dev *dev)
 	rslt = bmp3_set_fifo_settings(settings_sel, dev);
 
 	/* Set the number of frames to be read so as to set the watermark length in the sensor */
-	dev->fifo->data.req_frames = 1;
+	dev->fifo->data.req_frames = 3;
 	rslt = bmp3_set_fifo_watermark(dev);
 
 	/* Set the power mode to normal */
 	rslt = set_normal_mode(dev);
 
-
-while(1)
-{	
-	try_count = 0xffff;
-	/* Poll till watermark level is reached in fifo */
-	do {
-		rslt = bmp3_get_status(dev);
-		try_count--;
-	} while ((dev->status.intr.fifo_wm == 0) && (try_count > 0));
-	 
-	if (try_count > 0) 
-	{	
-		// this part was used for debugging purposes 
-		// set Debug Line high
-		ioport_set_pin_level(TEST_PIN, 1);
-		rslt = bmp3_get_fifo_data(dev);
-		ioport_set_pin_level(TEST_PIN, 0);
-		rslt = bmp3_extract_fifo_data(sensor_data, dev);
-		ioport_set_pin_level(TEST_PIN, 1);
-		// read status registers to clear interrupt
-		//rslt = bmp3_get_status(dev);
-		
-		if (dev->status.intr.drdy == 1)
-		{
-			rslt = get_sensor_data(dev);
-		}	
-	}
-}
 	return rslt;
 }
